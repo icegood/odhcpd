@@ -47,6 +47,7 @@ enum {
 	IFACE_ATTR_INTERFACE,
 	IFACE_ATTR_IFNAME,
 	IFACE_ATTR_NETWORKID,
+	IFACE_ATTR_IGNORED,
 	IFACE_ATTR_DYNAMICDHCP,
 	IFACE_ATTR_LEASETIME,
 	IFACE_ATTR_LIMIT,
@@ -59,6 +60,7 @@ enum {
 	IFACE_ATTR_NDP,
 	IFACE_ATTR_ROUTER,
 	IFACE_ATTR_DNS,
+	IFACE_ATTR_DNSV4,
 	IFACE_ATTR_DNS_SERVICE,
 	IFACE_ATTR_DOMAIN,
 	IFACE_ATTR_FILTER_CLASS,
@@ -100,6 +102,7 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
 	[IFACE_ATTR_INTERFACE] = { .name = "interface", .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_IFNAME] = { .name = "ifname", .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_NETWORKID] = { .name = "networkid", .type = BLOBMSG_TYPE_STRING },
+	[IFACE_ATTR_IGNORED] = { .name = "ignore", .type = BLOBMSG_TYPE_BOOL },
 	[IFACE_ATTR_DYNAMICDHCP] = { .name = "dynamicdhcp", .type = BLOBMSG_TYPE_BOOL },
 	[IFACE_ATTR_LEASETIME] = { .name = "leasetime", .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_START] = { .name = "start", .type = BLOBMSG_TYPE_INT32 },
@@ -111,6 +114,7 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
 	[IFACE_ATTR_DHCPV6] = { .name = "dhcpv6", .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_NDP] = { .name = "ndp", .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_ROUTER] = { .name = "router", .type = BLOBMSG_TYPE_ARRAY },
+	[IFACE_ATTR_DNSV4] = { .name = "dnsv4", .type = BLOBMSG_TYPE_ARRAY },
 	[IFACE_ATTR_DNS] = { .name = "dns", .type = BLOBMSG_TYPE_ARRAY },
 	[IFACE_ATTR_DNS_SERVICE] = { .name = "dns_service", .type = BLOBMSG_TYPE_BOOL },
 	[IFACE_ATTR_DOMAIN] = { .name = "domain", .type = BLOBMSG_TYPE_ARRAY },
@@ -150,6 +154,7 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
 
 static const struct uci_blob_param_info iface_attr_info[IFACE_ATTR_MAX] = {
 	[IFACE_ATTR_UPSTREAM] = { .type = BLOBMSG_TYPE_STRING },
+	[IFACE_ATTR_DNSV4] = { .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_DNS] = { .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_DOMAIN] = { .type = BLOBMSG_TYPE_STRING },
 };
@@ -234,11 +239,11 @@ static void set_interface_defaults(struct interface *iface)
 
 static void clean_interface(struct interface *iface)
 {
-	free(iface->dns);
 	free(iface->search);
 	free(iface->upstream);
 	free(iface->dhcpv4_router);
 	free(iface->dhcpv4_dns);
+	free(iface->dns);
 	free(iface->dhcpv6_raw);
 	free(iface->filter_class);
 	free(iface->dhcpv4_ntp);
@@ -631,7 +636,9 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 		}
 	}
 
-	iface->inuse = true;
+	if ((c = tb[IFACE_ATTR_IGNORED])) {
+		iface->inuse = !blobmsg_get_bool(c);
+	}
 
 	if ((c = tb[IFACE_ATTR_DYNAMICDHCP]))
 		iface->no_dynamic_dhcp = !blobmsg_get_bool(c);
@@ -767,27 +774,12 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 		iface->always_rewrite_dns = true;
 		blobmsg_for_each_attr(cur, c, rem) {
-			struct in_addr addr4;
 			struct in6_addr addr6;
 
 			if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING || !blobmsg_check_attr(cur, false))
 				continue;
 
-			if (inet_pton(AF_INET, blobmsg_get_string(cur), &addr4) == 1) {
-				if (addr4.s_addr == INADDR_ANY) {
-					syslog(LOG_ERR, "Invalid %s value configured for interface '%s'",
-							iface_attrs[IFACE_ATTR_DNS].name, iface->name);
-
-					continue;
-				}
-
-				iface->dhcpv4_dns = realloc(iface->dhcpv4_dns,
-						(++iface->dhcpv4_dns_cnt) * sizeof(*iface->dhcpv4_dns));
-				if (!iface->dhcpv4_dns)
-					goto err;
-
-				iface->dhcpv4_dns[iface->dhcpv4_dns_cnt - 1] = addr4;
-			} else if (inet_pton(AF_INET6, blobmsg_get_string(cur), &addr6) == 1) {
+			if (inet_pton(AF_INET6, blobmsg_get_string(cur), &addr6) == 1) {
 				if (IN6_IS_ADDR_UNSPECIFIED(&addr6)) {
 					syslog(LOG_ERR, "Invalid %s value configured for interface '%s'",
 							iface_attrs[IFACE_ATTR_DNS].name, iface->name);
@@ -803,7 +795,38 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 				iface->dns[iface->dns_cnt - 1] = addr6;
 			} else
 				syslog(LOG_ERR, "Invalid %s value configured for interface '%s'",
-						iface_attrs[IFACE_ATTR_DNS].name, iface->name);
+							iface_attrs[IFACE_ATTR_DNS].name, iface->name);
+		}
+	}
+
+	if ((c = tb[IFACE_ATTR_DNSV4])) {
+		struct blob_attr *cur;
+		unsigned rem;
+
+		iface->always_rewrite_dns = true;
+		blobmsg_for_each_attr(cur, c, rem) {
+			struct in_addr addr4;
+
+			if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING || !blobmsg_check_attr(cur, false))
+				continue;
+
+			if (inet_pton(AF_INET, blobmsg_get_string(cur), &addr4) == 1) {
+				if (addr4.s_addr == INADDR_ANY) {
+					syslog(LOG_ERR, "Invalid %s value configured for interface '%s'",
+					       iface_attrs[IFACE_ATTR_DNSV4].name, iface->name);
+
+					continue;
+				}
+
+				iface->dhcpv4_dns = realloc(iface->dhcpv4_dns,
+						(++iface->dhcpv4_dns_cnt) * sizeof(*iface->dhcpv4_dns));
+				if (!iface->dhcpv4_dns)
+					goto err;
+
+				iface->dhcpv4_dns[iface->dhcpv4_dns_cnt - 1] = addr4;
+			} else
+				syslog(LOG_ERR, "Invalid %s value configured for interface '%s'",
+						iface_attrs[IFACE_ATTR_DNSV4].name, iface->name);
 		}
 	}
 

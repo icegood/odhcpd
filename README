@@ -108,7 +108,9 @@ dhcpv6_pd_min_len	integer	-			Minimum prefix length to delegate with IA_PD
 router			list    <local address>		Routers to announce
 							accepts IPv4 only
 dns			list	<local address>		DNS servers to announce
-							accepts IPv4 and IPv6
+							accepts IPv6
+dnsv4			list	<local address>		DNS servers to announce
+							accepts IPv4
 dns_service		bool	1			Announce the address of interface as DNS service
 							if the list of dns is empty
 domain			list	<local search domain>	Search domains to announce
