@@ -30,7 +30,7 @@ struct vlist_tree leases = VLIST_TREE_INIT(leases, lease_cmp, lease_update, true
 AVL_TREE(interfaces, avl_strcmp, false, NULL);
 struct config config = {.legacy = false, .main_dhcpv4 = false,
 			.dhcp_cb = NULL, .dhcp_statefile = NULL, .dhcp_hostsfile = NULL,
-			.log_level = LOG_WARNING};
+			.log_level = LOG_DEBUG};
 
 #define START_DEFAULT	100
 #define LIMIT_DEFAULT	150
@@ -213,6 +213,8 @@ static const struct { const char *name; uint8_t flag; } ra_flags[] = {
 
 static void set_interface_defaults(struct interface *iface)
 {
+	iface->inuse = true;
+	iface->no_dynamic_dhcp = false;
 	iface->ignore = true;
 	iface->dhcpv4 = MODE_DISABLED;
 	iface->dhcpv6 = MODE_DISABLED;
@@ -235,6 +237,12 @@ static void set_interface_defaults(struct interface *iface)
 	iface->ra_mininterval = iface->ra_maxinterval/3;
 	iface->ra_lifetime = -1;
 	iface->ra_dns = true;
+	//
+	iface->dhcpv4_router_cnt = 0;
+	iface->dhcpv4_dns_cnt = 0;
+	iface->dhcpv4_dns = NULL;
+	iface->dns_cnt = 0;
+	iface->dns = NULL;
 }
 
 static void clean_interface(struct interface *iface)
@@ -545,7 +553,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 	struct blob_attr *tb[IFACE_ATTR_MAX], *c;
 	ssize_t addrs_len;
 	bool get_addrs = false;
-	int mode;
+	int mode, res;
 	const char *ifname = NULL;
 
 	blobmsg_parse(iface_attrs, IFACE_ATTR_MAX, tb, data, len);
@@ -562,7 +570,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 		iface = calloc_a(sizeof(*iface), &new_name, strlen(name) + 1);
 		if (!iface)
-			return -1;
+			return -2;
 
 		iface->name = strcpy(new_name, name);
 		iface->avl.key = iface->name;
@@ -593,6 +601,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 		ifname = ubus_get_ifname(name);
 #endif
 
+	res = 1;
 	if (!iface->ifname && !ifname)
 		goto err;
 
@@ -600,13 +609,16 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 		free(iface->ifname);
 		iface->ifname = strdup(ifname);
 
+		res = 2;
 		if (!iface->ifname)
 			goto err;
 
+		res = 3;
 		if (!iface->ifindex &&
 			(iface->ifindex = if_nametoindex(iface->ifname)) <= 0)
 			goto err;
 
+		res = 4;
 		if ((iface->ifflags = odhcpd_get_flags(iface)) < 0)
 			goto err;
 	}
@@ -637,7 +649,11 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 	}
 
 	if ((c = tb[IFACE_ATTR_IGNORED])) {
-		iface->inuse = !blobmsg_get_bool(c);
+		bool bval = blobmsg_get_bool(c);
+		syslog(LOG_INFO, "Value inuse['%s'] = '%s', %d", iface->name, blobmsg_get_string(c), bval);
+		iface->inuse = !bval;
+	} else {
+		syslog(LOG_INFO, "Value inuse['%s'] = empty", iface->name);
 	}
 
 	if ((c = tb[IFACE_ATTR_DYNAMICDHCP]))
@@ -691,6 +707,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 			iface->upstream = realloc(iface->upstream,
 					iface->upstream_len + blobmsg_data_len(cur));
+			res = 11;
 			if (!iface->upstream)
 				goto err;
 
@@ -758,6 +775,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 			if (inet_pton(AF_INET, blobmsg_get_string(cur), &addr4) == 1) {
 				iface->dhcpv4_router = realloc(iface->dhcpv4_router,
 						(++iface->dhcpv4_router_cnt) * sizeof(*iface->dhcpv4_router));
+				res = 12;
 				if (!iface->dhcpv4_router)
 					goto err;
 
@@ -789,6 +807,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 				iface->dns = realloc(iface->dns,
 						(++iface->dns_cnt) * sizeof(*iface->dns));
+				res = 13;
 				if (!iface->dns)
 					goto err;
 
@@ -820,6 +839,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 				iface->dhcpv4_dns = realloc(iface->dhcpv4_dns,
 						(++iface->dhcpv4_dns_cnt) * sizeof(*iface->dhcpv4_dns));
+				res = 14;
 				if (!iface->dhcpv4_dns)
 					goto err;
 
@@ -861,6 +881,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 			}
 
 			iface->search = realloc(iface->search, iface->search_len + len);
+			res = 15;
 			if (!iface->search)
 				goto err;
 
@@ -1086,21 +1107,25 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 			struct in6_addr addr6;
 
 			if (inet_pton(AF_INET, str, &addr4) == 1) {
+				res = 16;
 				if (addr4.s_addr == INADDR_ANY)
 					goto err;
 
 				iface->dhcpv4_ntp = realloc(iface->dhcpv4_ntp,
 						(++iface->dhcpv4_ntp_cnt) * sizeof(*iface->dhcpv4_ntp));
+				res = 17;
 				if (!iface->dhcpv4_ntp)
 					goto err;
 
 				iface->dhcpv4_ntp[iface->dhcpv4_ntp_cnt - 1] = addr4;
 			} else if (inet_pton(AF_INET6, str, &addr6) == 1) {
+				res = 18;
 				if (IN6_IS_ADDR_UNSPECIFIED(&addr6))
 					goto err;
 
 				iface->dhcpv6_sntp = realloc(iface->dhcpv6_sntp,
 						(++iface->dhcpv6_sntp_cnt) * sizeof(*iface->dhcpv6_sntp));
+				res = 19;
 				if (!iface->dhcpv6_sntp)
 					goto err;
 
@@ -1119,15 +1144,16 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 err:
 	close_interface(iface);
-	return -1;
+	return res;
 }
 
-static int set_interface(struct uci_section *s)
+static void set_interface(struct uci_section *s)
 {
 	blob_buf_init(&b, 0);
 	uci_to_blob(&b, s, &interface_attr_list);
 
-	return config_parse_interface(blob_data(b.head), blob_len(b.head), s->e.name, true);
+	int res = config_parse_interface(blob_data(b.head), blob_len(b.head), s->e.name, true);
+	syslog(LOG_INFO, "set_interface: %s.%s: %d", s->type, s->e.name, res);
 }
 
 static void lease_delete_assignments(struct lease *l, bool v6)
@@ -1303,13 +1329,16 @@ void reload_services(struct interface *iface)
 	}
 }
 
-void odhcpd_reload(void)
+void odhcpd_reload(const char* source)
 {
 	struct uci_context *uci = uci_alloc_context();
 	struct interface *master = NULL, *i, *tmp;
 
-	if (!uci)
+    syslog(LOG_DEBUG, "odhcpd_reload from %s", source);
+	if (!uci) {
+        syslog(LOG_WARNING, "uci no available");
 		return;
+    }
 
 	vlist_update(&leases);
 	avl_for_each_element(&interfaces, i, avl)
@@ -1329,8 +1358,9 @@ void odhcpd_reload(void)
 		/* 2. DHCP pools */
 		uci_foreach_element(&dhcp->sections, e) {
 			struct uci_section *s = uci_to_section(e);
-			if (!strcmp(s->type, "dhcp"))
+			if (!strcmp(s->type, "dhcp")) {
 				set_interface(s);
+			}
 		}
 
 		/* 3. Static leases */
@@ -1349,10 +1379,6 @@ void odhcpd_reload(void)
 	}
 
 	vlist_flush(&leases);
-
-#ifdef WITH_UBUS
-	ubus_apply_network();
-#endif
 
 	bool any_dhcpv6_slave = false, any_ra_slave = false, any_ndp_slave = false;
 
@@ -1434,7 +1460,9 @@ static void handle_signal(int signal)
 	char b[1] = {0};
 
 	if (signal == SIGHUP) {
-		if (write(reload_pipe[1], b, sizeof(b)) < 0) {}
+		if (write(reload_pipe[1], b, sizeof(b)) < 0) {
+            // no signal safe error process
+        }
 	} else
 		uloop_end();
 }
@@ -1442,16 +1470,20 @@ static void handle_signal(int signal)
 static void reload_cb(struct uloop_fd *u, _unused unsigned int events)
 {
 	char b[512];
-	if (read(u->fd, b, sizeof(b)) < 0) {}
+	if (read(u->fd, b, sizeof(b)) < 0) {
+        syslog(LOG_WARNING, "reload_cb error: %m");
+    }
 
-	odhcpd_reload();
+	odhcpd_reload("reload_cb");
 }
 
 static struct uloop_fd reload_fd = { .fd = -1, .cb = reload_cb };
 
 void odhcpd_run(void)
 {
-	if (pipe2(reload_pipe, O_NONBLOCK | O_CLOEXEC) < 0) {}
+	if (pipe2(reload_pipe, O_NONBLOCK | O_CLOEXEC) < 0) {
+        syslog(LOG_ERR, "Cannot create pipe for signal handling: %m");
+    }
 
 	reload_fd.fd = reload_pipe[0];
 	uloop_fd_add(&reload_fd, ULOOP_READ);
@@ -1465,6 +1497,6 @@ void odhcpd_run(void)
 		sleep(1);
 #endif
 
-	odhcpd_reload();
+	odhcpd_reload("init");
 	uloop_run();
 }

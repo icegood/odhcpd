@@ -87,6 +87,9 @@ int dhcpv4_setup_interface(struct interface *iface, bool enable)
 	}
 
 	if (enable) {
+		// better try network address
+		// https://gitlab.com/ipcalc/ipcalc/-/blob/master/ipcalc.c?ref_type=heads#L125 
+		// of iface->addr4[0].addr.in
 		struct sockaddr_in bind_addr = {AF_INET, htons(DHCPV4_SERVER_PORT),
 					{INADDR_ANY}, {0}};
 		int val = 1;
@@ -1052,7 +1055,7 @@ dhcpv4_lease(struct interface *iface, enum dhcpv4_msg msg, const uint8_t *mac,
 	}
 
 	if (msg == DHCPV4_MSG_DISCOVER || msg == DHCPV4_MSG_REQUEST) {
-		bool assigned = !!a;
+		bool assigned = (a != NULL);
 
 		if (!a) {
 			if (!iface->no_dynamic_dhcp || l) {
@@ -1165,6 +1168,14 @@ dhcpv4_lease(struct interface *iface, enum dhcpv4_msg msg, const uint8_t *mac,
 	}
 
 	dhcpv6_ia_write_statefile();
-
+	
+	if (a) {
+		struct in_addr saddr;
+		saddr.s_addr = a->addr;
+		const char *addr = inet_ntoa(saddr);
+		syslog(LOG_INFO, "Assignment on interface %s is %s", iface->ifname, addr);
+	} else {
+		syslog(LOG_INFO, "No assignment on interface %s", iface->ifname);
+	}
 	return a;
 }

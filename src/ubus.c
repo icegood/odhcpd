@@ -14,7 +14,7 @@ static struct ubus_context *ubus = NULL;
 static struct ubus_subscriber netifd;
 static struct blob_buf b;
 static struct blob_attr *dump = NULL;
-static uint32_t objid = 0;
+static uint32_t netiface_ubus_objid = 0;
 static struct ubus_request req_dump = { .list = LIST_HEAD_INIT(req_dump.list) };
 
 static int handle_dhcpv4_leases(struct ubus_context *ctx, _unused struct ubus_object *obj,
@@ -238,24 +238,26 @@ static void handle_dump(_unused struct ubus_request *req, _unused int type, stru
 	struct blob_attr *tb[DUMP_ATTR_MAX];
 	blobmsg_parse(dump_attrs, DUMP_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
 
-	if (!tb[DUMP_ATTR_INTERFACE])
+	if (!tb[DUMP_ATTR_INTERFACE]) {
+        syslog(LOG_WARNING, "No interface name to update via ubus");
 		return;
+    }
 
 	free(dump);
 	dump = blob_memdup(tb[DUMP_ATTR_INTERFACE]);
-	odhcpd_reload();
+	odhcpd_reload("handle_dump");
 }
 
 
 static void update_netifd(bool subscribe)
 {
 	if (subscribe)
-		ubus_subscribe(ubus, &netifd, objid);
+		ubus_subscribe(ubus, &netifd, netiface_ubus_objid);
 
 	ubus_abort_request(ubus, &req_dump);
 	blob_buf_init(&b, 0);
 
-	if (!ubus_invoke_async(ubus, objid, "dump", b.head, &req_dump)) {
+	if (!ubus_invoke_async(ubus, netiface_ubus_objid, "dump", b.head, &req_dump)) {
 		req_dump.data_cb = handle_dump;
 		ubus_complete_request_async(ubus, &req_dump);
 	}
@@ -287,7 +289,7 @@ static int handle_update(_unused struct ubus_context *ctx, _unused struct ubus_o
 	return 0;
 }
 
-
+/*
 void ubus_apply_network(void)
 {
 	struct blob_attr *a;
@@ -296,15 +298,17 @@ void ubus_apply_network(void)
 	if (!dump)
 		return;
 
-	blobmsg_for_each_attr(a, dump, rem) {
+    blobmsg_for_each_attr(a, dump, rem) {
 		struct blob_attr *tb[IFACE_ATTR_MAX];
 		blobmsg_parse(iface_attrs, IFACE_ATTR_MAX, tb, blobmsg_data(a), blobmsg_data_len(a));
 
-		if (!tb[IFACE_ATTR_INTERFACE] || !tb[IFACE_ATTR_DATA])
+        if (!tb[IFACE_ATTR_INTERFACE] || !tb[IFACE_ATTR_DATA])
 			continue;
 
 		const char *interface = (tb[IFACE_ATTR_INTERFACE]) ?
 				blobmsg_get_string(tb[IFACE_ATTR_INTERFACE]) : "";
+
+        syslog(LOG_INFO, "Run interface update via ubus for %s", interface);
 
 		bool matched = false;
 		struct interface *c, *tmp;
@@ -317,17 +321,21 @@ void ubus_apply_network(void)
 			if (!cmatched && (!c->upstream_len || !f || (f != c->upstream && f[-1] != 0)))
 				continue;
 
-			if (!c->ignore)
+			if (!c->ignore) {
 				config_parse_interface(blobmsg_data(tb[IFACE_ATTR_DATA]),
 						blobmsg_data_len(tb[IFACE_ATTR_DATA]), c->name, false);
+				syslog(LOG_INFO, "Run from ubus_apply_network 1: %s", c->name);
+			}
 		}
 
-		if (!matched)
+		if (!matched) {
 			config_parse_interface(blobmsg_data(tb[IFACE_ATTR_DATA]),
 					blobmsg_data_len(tb[IFACE_ATTR_DATA]), interface, false);
+			syslog(LOG_INFO, "Run from ubus_apply_network 2: %s", a->data);
+		}
 	}
 }
-
+*/
 
 enum {
 	OBJ_ATTR_ID,
@@ -372,7 +380,7 @@ static void handle_event(_unused struct ubus_context *ctx, _unused struct ubus_e
 	if (strcmp(blobmsg_get_string(tb[OBJ_ATTR_PATH]), "network.interface"))
 		return;
 
-	objid = blobmsg_get_u32(tb[OBJ_ATTR_ID]);
+	netiface_ubus_objid = blobmsg_get_u32(tb[OBJ_ATTR_ID]);
 	update_netifd(true);
 }
 
@@ -451,7 +459,7 @@ int ubus_init(void)
 	ubus_add_uloop(ubus);
 	ubus_add_object(ubus, &main_object);
 	ubus_register_event_handler(ubus, &event_handler, "ubus.object.add");
-	if (!ubus_lookup_id(ubus, "network.interface", &objid))
+	if (!ubus_lookup_id(ubus, "network.interface", &netiface_ubus_objid))
 		update_netifd(true);
 
 	return 0;

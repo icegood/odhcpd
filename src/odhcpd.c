@@ -46,11 +46,6 @@
 static int ioctl_sock = -1;
 static int urandom_fd = -1;
 
-static void sighandler(_unused int signal)
-{
-	uloop_end();
-}
-
 static void print_usage(const char *app)
 {
 	printf(
@@ -76,6 +71,7 @@ static bool ipv6_enabled(void)
 int main(int argc, char **argv)
 {
 	openlog("odhcpd", LOG_PERROR | LOG_PID, LOG_DAEMON);
+    setlogmask(LOG_UPTO(LOG_DEBUG));
 	int opt;
 
 	while ((opt = getopt(argc, argv, "hl:")) != -1) {
@@ -85,7 +81,7 @@ int main(int argc, char **argv)
 			return 0;
 		case 'l':
 			config.log_level = (atoi(optarg) & LOG_PRIMASK);
-			fprintf(stderr, "Log level set to %d\n", config.log_level);
+			syslog(LOG_DEBUG, "Log level set to %d\n", config.log_level);
 			break;
 		}
 	}
@@ -104,10 +100,6 @@ int main(int argc, char **argv)
 
 	if ((urandom_fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC)) < 0)
 		return 4;
-
-	signal(SIGUSR1, SIG_IGN);
-	signal(SIGINT, sighandler);
-	signal(SIGTERM, sighandler);
 
 	if (netlink_init())
 		return 4;
@@ -331,8 +323,12 @@ static void odhcpd_receive_packets(struct uloop_fd *u, _unused unsigned int even
 		socklen_t ret_len = sizeof(ret);
 
 		u->error = false;
-		if (e->handle_error && getsockopt(u->fd, SOL_SOCKET, SO_ERROR, &ret, &ret_len) == 0)
+		if (e->handle_error && getsockopt(u->fd, SOL_SOCKET, SO_ERROR, &ret, &ret_len) == 0) {
 			e->handle_error(e, ret);
+		} else {
+			syslog(LOG_WARNING, "Received error for DHCP");
+		}
+		return;
 	}
 
 	if (e->recv_msgs) {
@@ -400,6 +396,9 @@ static void odhcpd_receive_packets(struct uloop_fd *u, _unused unsigned int even
 			inet_ntop(AF_INET6, &addr.in6.sin6_addr, ipbuf, sizeof(ipbuf));
 		else if (addr.in.sin_family == AF_INET)
 			inet_ntop(AF_INET, &addr.in.sin_addr, ipbuf, sizeof(ipbuf));
+		else {
+			syslog(LOG_WARNING, "Unknown address type received. Set as kernel");
+		}
 
 		/* From netlink */
 		if (addr.nl.nl_family == AF_NETLINK) {
@@ -411,8 +410,11 @@ static void odhcpd_receive_packets(struct uloop_fd *u, _unused unsigned int even
 			struct interface *iface;
 
 			avl_for_each_element(&interfaces, iface, avl) {
-				if (iface->ifindex != destiface)
+				if (iface->ifindex != destiface) {
+					syslog(LOG_DEBUG, "Ignored packet on %s@%s", 
+						iface->name, iface->ifname);
 					continue;
+				}
 
 				syslog(LOG_DEBUG, "Received %zd Bytes from %s%%%s@%s", len,
 						ipbuf, iface->name, iface->ifname);

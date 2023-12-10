@@ -45,6 +45,13 @@ int dhcpv6_init(void)
 	return dhcpv6_ia_init();
 }
 
+
+// https://gitlab.com/ipcalc/ipcalc/-/blob/master/ipcalc.c?ref_type=heads#L936
+// for iface->addr6[0].addr.in6
+// static struct in6_addr get_network_addr_from_interface(struct in6_addr in, uint8_t prefix) {
+// 	
+// }
+
 int dhcpv6_setup_interface(struct interface *iface, bool enable)
 {
 	int ret = 0;
