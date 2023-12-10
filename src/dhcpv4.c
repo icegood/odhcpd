@@ -63,6 +63,9 @@ static void decr_ref_cnt_ip(struct odhcpd_ref_ip **ptr, struct interface *iface)
 	}
 
 	*ptr = NULL;
+		// better try network address
+		// https://gitlab.com/ipcalc/ipcalc/-/blob/master/ipcalc.c?ref_type=heads#L125 
+		// of iface->addr4[0].addr.in
 }
 
 static bool addr_is_fr_ip(struct interface *iface, struct in_addr *addr)
@@ -1041,6 +1044,12 @@ void dhcpv4_handle_msg(void *src_addr, void *data, size_t len,
 				     req_clientid_len, req_addr, &req_leasetime,
 				     req_hostname, req_hostname_len, req_accept_fr,
 				     &reply_incl_fr, &fr_serverid);
+		if (lease) {
+			const char *addr = inet_ntoa(lease->ipv4);
+			info("Assignment on interface %s is %s", lease->iface->ifname, addr);
+		} else {
+			info("No assignment on interface %s", iface->ifname);
+		}
 		break;
 	default:
 		return;
@@ -1533,6 +1542,7 @@ bool dhcpv4_setup_interface(struct interface *iface, bool enable)
 		goto error;
 	}
 
+	debug("Binding DHCPv4 to interface %s", iface->ifname);
 	if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface->ifname,
 		       strlen(iface->ifname)) < 0) {
 		error("setsockopt(SO_BINDTODEVICE): %m");
@@ -1651,7 +1661,7 @@ int dhcpv4_init(void)
 {
 	static struct netevent_handler dhcpv4_netevent_handler = { .cb = dhcpv4_netevent_cb };
 	static struct uloop_timeout valid_until_timeout = { .cb = dhcpv4_valid_until_cb };
-
+	
 	uloop_timeout_set(&valid_until_timeout, 1000);
 	netlink_add_netevent_handler(&dhcpv4_netevent_handler);
 

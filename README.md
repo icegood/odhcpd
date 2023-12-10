@@ -91,7 +91,8 @@ and may also receive information from ubus
 | dhcpv6_pd_preferred   |bool | 0 | Set the DHCPv6-PD Preferred (P) flag in outgoing ICMPv6 RA message PIOs (RFC9762); requires `dhcpv6` and `dhcpv6_pd`. |
 | dhcpv6_pd_min_len	|integer| 62	| Minimum prefix length to delegate with IA_PD (adjusted, if necessary, to be longer than the interface prefix length).  Range [1,64] |
 | router		|list	|`<local address>`| IPv4 addresses of routers on a given subnet (provided via DHCPv4, should be in order of preference) |
-| dns			|list	|`<local address>`| DNS servers to announce, accepts IPv4 and IPv6 |
+| dns			|list	|`<local address>`| DNS servers to announce, accepts IPv6 |
+| dnsv4		|list	|`<local address>`| DNS servers to announce, accepts IPv4 |
 | dnr			|list	|disabled| Encrypted DNS servers to announce, `<priority> <domain name> [<comma separated IP addresses> <SvcParams (key=value)>...]` |
 | dns_service		|bool	| 1	| Announce the address of interface as DNS service if the list of dns is empty |
 | domain		|list	|`<local search domain>`| Search domains to announce |

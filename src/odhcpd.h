@@ -582,7 +582,6 @@ int config_set_lease_cfg_from_blobmsg(struct blob_attr *ba);
 #ifdef WITH_UBUS
 int ubus_init(void);
 const char* ubus_get_ifname(const char *name);
-void ubus_apply_network(void);
 bool ubus_has_prefix(const char *name, const char *ifname);
 void ubus_bcast_dhcpv4_event(const char *type, const char *iface,
 			     const struct dhcpv4_lease *lease);
@@ -664,6 +663,6 @@ int dhcpv6_setup_interface(struct interface *iface, bool enable);
 int ndp_setup_interface(struct interface *iface, bool enable);
 void reload_services(struct interface *iface);
 
-void odhcpd_reload(void);
+void odhcpd_reload(const char* source);
 
 #endif /* _ODHCPD_H_ */

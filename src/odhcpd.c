@@ -62,7 +62,6 @@ void __iflog(int lvl, const char *fmt, ...)
 		vfprintf(stderr, fmt, ap);
 		fprintf(stderr, "\n");
 	}
-
 	va_end(ap);
 }
 
@@ -108,6 +107,7 @@ static bool ipv6_enabled(void)
 
 int main(int argc, char **argv)
 {
+    setlogmask(LOG_UPTO(LOG_DEBUG));
 	int opt;
 
 	while ((opt = getopt(argc, argv, "c:l:fuh")) != -1) {
@@ -133,7 +133,7 @@ int main(int argc, char **argv)
 		case 'l':
 			config.log_level = (atoi(optarg) & LOG_PRIMASK);
 			config.log_level_cmdline = true;
-			fprintf(stderr, "Log level set to %d\n", config.log_level);
+			debug("Log level set to %d\n", config.log_level);
 			break;
 		case 'f':
 			config.log_syslog = false;
@@ -437,8 +437,12 @@ static void odhcpd_receive_packets(struct uloop_fd *u, _o_unused unsigned int ev
 		socklen_t ret_len = sizeof(ret);
 
 		u->error = false;
-		if (e->handle_error && getsockopt(u->fd, SOL_SOCKET, SO_ERROR, &ret, &ret_len) == 0)
+		if (e->handle_error && getsockopt(u->fd, SOL_SOCKET, SO_ERROR, &ret, &ret_len) == 0) {
 			e->handle_error(e, ret);
+		} else {
+			warn("Received error for DHCP");
+		}
+		return;
 	}
 
 	if (e->recv_msgs) {
@@ -506,6 +510,9 @@ static void odhcpd_receive_packets(struct uloop_fd *u, _o_unused unsigned int ev
 			inet_ntop(AF_INET6, &addr.in6.sin6_addr, ipbuf, sizeof(ipbuf));
 		else if (addr.in.sin_family == AF_INET)
 			inet_ntop(AF_INET, &addr.in.sin_addr, ipbuf, sizeof(ipbuf));
+		else {
+			warn("Unknown address type received. Set as kernel");
+		}
 
 		/* From netlink */
 		if (addr.nl.nl_family == AF_NETLINK) {
@@ -516,8 +523,11 @@ static void odhcpd_receive_packets(struct uloop_fd *u, _o_unused unsigned int ev
 			struct interface *iface;
 
 			avl_for_each_element(&interfaces, iface, avl) {
-				if (iface->ifindex != destiface)
+				if (iface->ifindex != destiface) {
+					debug("Ignored packet on %s@%s", 
+						iface->name, iface->ifname);
 					continue;
+				}
 
 				debug("Received %zd Bytes from %s%%%s@%s", len,
 				      ipbuf, iface->name, iface->ifname);

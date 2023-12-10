@@ -92,6 +92,7 @@ enum {
 	IFACE_ATTR_INTERFACE,
 	IFACE_ATTR_IFNAME,
 	IFACE_ATTR_NETWORKID,
+	IFACE_ATTR_IGNORED,
 	IFACE_ATTR_DYNAMICDHCP,
 	IFACE_ATTR_LEASETIME,
 	IFACE_ATTR_DHCPV4_POOL_START,
@@ -104,6 +105,7 @@ enum {
 	IFACE_ATTR_NDP,
 	IFACE_ATTR_ROUTER,
 	IFACE_ATTR_DNS,
+	IFACE_ATTR_DNSV4,
 	IFACE_ATTR_DNR,
 	IFACE_ATTR_DNS_SERVICE,
 	IFACE_ATTR_DNS_DOMAIN_SEARCH,
@@ -146,6 +148,7 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
 	[IFACE_ATTR_INTERFACE] = { .name = "interface", .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_IFNAME] = { .name = "ifname", .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_NETWORKID] = { .name = "networkid", .type = BLOBMSG_TYPE_STRING },
+	[IFACE_ATTR_IGNORED] = { .name = "ignore", .type = BLOBMSG_TYPE_BOOL },
 	[IFACE_ATTR_DYNAMICDHCP] = { .name = "dynamicdhcp", .type = BLOBMSG_TYPE_BOOL },
 	[IFACE_ATTR_LEASETIME] = { .name = "leasetime", .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_DHCPV4_POOL_START] = { .name = "start", .type = BLOBMSG_TYPE_INT32 },
@@ -157,6 +160,7 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
 	[IFACE_ATTR_DHCPV6] = { .name = "dhcpv6", .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_NDP] = { .name = "ndp", .type = BLOBMSG_TYPE_STRING },
 	[IFACE_ATTR_ROUTER] = { .name = "router", .type = BLOBMSG_TYPE_ARRAY },
+	[IFACE_ATTR_DNSV4] = { .name = "dnsv4", .type = BLOBMSG_TYPE_ARRAY },
 	[IFACE_ATTR_DNS] = { .name = "dns", .type = BLOBMSG_TYPE_ARRAY },
 	[IFACE_ATTR_DNR] = { .name = "dnr", .type = BLOBMSG_TYPE_ARRAY },
 	[IFACE_ATTR_DNS_SERVICE] = { .name = "dns_service", .type = BLOBMSG_TYPE_BOOL },
@@ -306,6 +310,8 @@ static const char *svc_param_key_names[DNR_SVC_MAX] = {
 
 static void set_interface_defaults(struct interface *iface)
 {
+	iface->inuse = true;
+	iface->no_dynamic_dhcp = false;
 	iface->ignore = true;
 	iface->dhcpv4 = MODE_DISABLED;
 	iface->dhcpv6 = MODE_DISABLED;
@@ -339,6 +345,12 @@ static void set_interface_defaults(struct interface *iface)
 	iface->ra_dns = true;
 	iface->pio_update = false;
 	iface->update_statefile = true;
+	//
+	iface->dhcpv4_routers_cnt = 0;
+	iface->dns_addrs4_cnt = 0;
+	iface->dns_addrs4 = NULL;
+	iface->dns_addrs6_cnt = 0;
+	iface->dns_addrs6 = NULL;
 }
 
 static void clean_interface(struct interface *iface)
@@ -369,6 +381,7 @@ static void close_interface(struct interface *iface)
 {
 	avl_delete(&interfaces, &iface->avl);
 
+	debug("close_interface: '%s'", iface->ifname);
 	router_setup_interface(iface, false);
 	dhcpv6_setup_interface(iface, false);
 	ndp_setup_interface(iface, false);
@@ -1097,7 +1110,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 	struct odhcpd_ipaddr *oaddrs = NULL;
 	ssize_t oaddrs_cnt;
 	bool get_addrs = false;
-	int mode;
+	int mode, res;
 	const char *ifname = NULL;
 
 	blobmsg_parse(iface_attrs, IFACE_ATTR_MAX, tb, data, len);
@@ -1114,7 +1127,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 		iface = calloc_a(sizeof(*iface), &new_name, strlen(name) + 1);
 		if (!iface)
-			return -1;
+			return -2;
 
 		iface->name = strcpy(new_name, name);
 		iface->avl.key = iface->name;
@@ -1138,12 +1151,12 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 			ifname = blobmsg_get_string(c);
 		else if ((c = tb[IFACE_ATTR_NETWORKID]))
 			ifname = blobmsg_get_string(c);
-	}
-
-	if (overwrite || !iface->ifname)
+		if (!iface->ifname && !ifname)
 		if (config.use_ubus)
 			ifname = ubus_get_ifname(name);
+	}
 
+	res = 1;
 	if (!iface->ifname && !ifname)
 		goto err;
 
@@ -1151,13 +1164,16 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 		free(iface->ifname);
 		iface->ifname = strdup(ifname);
 
+		res = 2;
 		if (!iface->ifname)
 			goto err;
 
+		res = 3;
 		if (!iface->ifindex &&
 			(iface->ifindex = if_nametoindex(iface->ifname)) <= 0)
 			goto err;
 
+		res = 4;
 		if ((iface->ifflags = odhcpd_get_flags(iface)) < 0)
 			goto err;
 	}
@@ -1186,7 +1202,13 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 		free(oaddrs);
 	}
 
-	iface->inuse = true;
+	if ((c = tb[IFACE_ATTR_IGNORED])) {
+		bool bval = blobmsg_get_bool(c);
+		info("Value inuse['%s'] = '%s', %d", iface->name, blobmsg_get_string(c), bval);
+		iface->inuse = !bval;
+	} else {
+		info("Value inuse['%s'] = empty", iface->name);
+	}
 
 	if ((c = tb[IFACE_ATTR_DYNAMICDHCP]))
 		iface->no_dynamic_dhcp = !blobmsg_get_bool(c);
@@ -1250,6 +1272,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 			tmp = realloc(iface->upstream, iface->upstream_len + blobmsg_data_len(cur));
 			if (!tmp)
+			res = 11;
 				goto err;
 
 			iface->upstream = tmp;
@@ -1315,6 +1338,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 			if (inet_pton(AF_INET, blobmsg_get_string(cur), &addr4) == 1) {
 				tmp = realloc(iface->dhcpv4_routers,
 					      (iface->dhcpv4_routers_cnt + 1) * sizeof(*iface->dhcpv4_routers));
+				res = 12;
 				if (!tmp)
 					goto err;
 
@@ -1345,8 +1369,40 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 		iface->always_rewrite_dns = true;
 		blobmsg_for_each_attr(cur, c, rem) {
-			struct in_addr addr4, *tmp4;
 			struct in6_addr addr6, *tmp6;
+
+			if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING || !blobmsg_check_attr(cur, false))
+				continue;
+
+			if (inet_pton(AF_INET6, blobmsg_get_string(cur), &addr6) == 1) {
+				if (IN6_IS_ADDR_UNSPECIFIED(&addr6)) {
+					error("Invalid %s value configured for interface '%s'",
+					      iface_attrs[IFACE_ATTR_DNS].name, iface->name);
+					continue;
+				}
+
+				tmp6 = realloc(iface->dns_addrs6,
+						(iface->dns_addrs6_cnt + 1) * sizeof(*iface->dns_addrs6));
+				res = 13;
+				if (!tmp6)
+					goto err;
+
+				iface->dns_addrs6 = tmp6;
+				iface->dns_addrs6[iface->dns_addrs6_cnt++] = addr6;
+			} else {
+				error("Invalid %s value configured for interface '%s'",
+					iface_attrs[IFACE_ATTR_DNS].name, iface->name);
+			}
+		}
+	}
+
+	if ((c = tb[IFACE_ATTR_DNSV4])) {
+		struct blob_attr *cur;
+		unsigned rem;
+
+		iface->always_rewrite_dns = true;
+		blobmsg_for_each_attr(cur, c, rem) {
+			struct in_addr addr4, *tmp4;
 
 			if (blobmsg_type(cur) != BLOBMSG_TYPE_STRING || !blobmsg_check_attr(cur, false))
 				continue;
@@ -1354,36 +1410,22 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 			if (inet_pton(AF_INET, blobmsg_get_string(cur), &addr4) == 1) {
 				if (addr4.s_addr == INADDR_ANY) {
 					error("Invalid %s value configured for interface '%s'",
-					      iface_attrs[IFACE_ATTR_DNS].name, iface->name);
+					       iface_attrs[IFACE_ATTR_DNSV4].name, iface->name);
 					continue;
 				}
 
-				tmp4 = realloc(iface->dns_addrs4, (iface->dns_addrs4_cnt + 1) *
-					       sizeof(*iface->dns_addrs4));
+				tmp4 = realloc(iface->dns_addrs4,
+						(iface->dns_addrs4_cnt + 1) * sizeof(*iface->dns_addrs4));
+				res = 14;
 				if (!tmp4)
 					goto err;
 
 				iface->dns_addrs4 = tmp4;
 				iface->dns_addrs4[iface->dns_addrs4_cnt++] = addr4;
 
-			} else if (inet_pton(AF_INET6, blobmsg_get_string(cur), &addr6) == 1) {
-				if (IN6_IS_ADDR_UNSPECIFIED(&addr6)) {
-					error("Invalid %s value configured for interface '%s'",
-					      iface_attrs[IFACE_ATTR_DNS].name, iface->name);
-					continue;
-				}
-
-				tmp6 = realloc(iface->dns_addrs6, (iface->dns_addrs6_cnt + 1) *
-					       sizeof(*iface->dns_addrs6));
-				if (!tmp6)
-					goto err;
-
-				iface->dns_addrs6 = tmp6;
-				iface->dns_addrs6[iface->dns_addrs6_cnt++] = addr6;
-
 			} else {
 				error("Invalid %s value configured for interface '%s'",
-				      iface_attrs[IFACE_ATTR_DNS].name, iface->name);
+					iface_attrs[IFACE_ATTR_DNSV4].name, iface->name);
 			}
 		}
 	}
@@ -1419,6 +1461,7 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 			}
 
 			tmp = realloc(iface->dns_search, iface->dns_search_len + ds_len);
+			res = 15;
 			if (!tmp)
 				goto err;
 
@@ -1723,22 +1766,26 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 			struct in6_addr addr6, *tmp6;
 
 			if (inet_pton(AF_INET, str, &addr4) == 1) {
+				res = 16;
 				if (addr4.s_addr == INADDR_ANY)
 					goto err;
 
 				tmp4 = realloc(iface->dhcpv4_ntp, (iface->dhcpv4_ntp_cnt + 1) * sizeof(*iface->dhcpv4_ntp));
 				if (!tmp4)
+				res = 17;
 					goto err;
 
 				iface->dhcpv4_ntp = tmp4;
 				iface->dhcpv4_ntp[iface->dhcpv4_ntp_cnt++] = addr4;
 
 			} else if (inet_pton(AF_INET6, str, &addr6) == 1) {
+				res = 18;
 				if (IN6_IS_ADDR_UNSPECIFIED(&addr6))
 					goto err;
 
 				tmp6 = realloc(iface->dhcpv6_sntp, (iface->dhcpv6_sntp_cnt + 1) * sizeof(*iface->dhcpv6_sntp));
 				if (!tmp6)
+				res = 19;
 					goto err;
 
 				iface->dhcpv6_sntp = tmp6;
@@ -1760,15 +1807,20 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 
 err:
 	close_interface(iface);
-	return -1;
+	return res;
 }
 
-static int set_interface(struct uci_section *s)
+static void set_interface(struct uci_section *s)
 {
 	blob_buf_init(&b, 0);
 	uci_to_blob(&b, s, &interface_attr_list);
 
-	return config_parse_interface(blob_data(b.head), blob_len(b.head), s->e.name, true);
+	int res = config_parse_interface(blob_data(b.head), blob_len(b.head), s->e.name, true);
+	if (res) {
+		warn("set_interface for (%s.%s) returns error %d", s->type, s->e.name, res);
+	} else {
+		info("set_interface for (%s.%s) configured properly", s->type, s->e.name);
+	}
 }
 
 static void lease_cfg_delete_dhcpv6_leases(struct lease_cfg *lease_cfg)
@@ -1968,14 +2020,14 @@ struct lease_cfg *config_find_lease_cfg_by_ipv4(const struct in_addr ipv4)
 
 void reload_services(struct interface *iface)
 {
-	if (iface->ifflags & IFF_RUNNING) {
-		debug("Enabling services with %s running", iface->ifname);
+	if (iface->ifflags & IFF_UP) {
+		debug("Enabling services with %s up", iface->ifname);
 		router_setup_interface(iface, iface->ra != MODE_DISABLED);
 		dhcpv6_setup_interface(iface, iface->dhcpv6 != MODE_DISABLED);
 		ndp_setup_interface(iface, iface->ndp != MODE_DISABLED);
 		dhcpv4_setup_interface(iface, iface->dhcpv4 != MODE_DISABLED);
 	} else {
-		debug("Disabling services with %s not running", iface->ifname);
+		debug("Disabling services with %s down", iface->ifname);
 		router_setup_interface(iface, false);
 		dhcpv6_setup_interface(iface, false);
 		ndp_setup_interface(iface, false);
@@ -2006,7 +2058,7 @@ static int ipv6_pxe_from_uci(struct uci_section* s)
 	return ipv6_pxe_entry_new(arch, url) ? -1 : 0;
 }
 
-void odhcpd_reload(void)
+void odhcpd_reload(const char* source)
 {
 	struct uci_context *uci = uci_alloc_context();
 	struct interface *master = NULL, *i, *tmp;
@@ -2014,8 +2066,11 @@ void odhcpd_reload(void)
 	char *uci_system_path = "system";
 	char *uci_network_path = "network";
 
-	if (!uci)
+    debug("odhcpd_reload from %s", source);
+	if (!uci) {
+        warn("uci no available");
 		return;
+    }
 
 	if (config.uci_cfgdir) {
 		size_t dlen = strlen(config.uci_cfgdir);
@@ -2059,8 +2114,9 @@ void odhcpd_reload(void)
 		/* 2. DHCP pools */
 		uci_foreach_element(&dhcp->sections, e) {
 			struct uci_section *s = uci_to_section(e);
-			if (!strcmp(s->type, "dhcp"))
+			if (!strcmp(s->type, "dhcp")) {
 				set_interface(s);
+			}
 		}
 
 		/* 3. Static lease cfgs */
@@ -2095,8 +2151,6 @@ void odhcpd_reload(void)
 	uci_unload(uci, system);
 
 	vlist_flush(&lease_cfgs);
-
-	ubus_apply_network();
 
 	bool any_dhcpv6_slave = false, any_ra_slave = false, any_ndp_slave = false;
 
@@ -2149,7 +2203,7 @@ void odhcpd_reload(void)
 
 
 	avl_for_each_element_safe(&interfaces, i, avl, tmp) {
-		if (i->inuse && i->ifflags & IFF_RUNNING) {
+		if (i->inuse && i->ifflags & IFF_UP) {
 			/* Resolve hybrid mode */
 			if (i->dhcpv6 == MODE_HYBRID)
 				i->dhcpv6 = (master && master->dhcpv6 == MODE_RELAY) ?
@@ -2173,7 +2227,7 @@ void odhcpd_reload(void)
 
 static void signal_reload(_o_unused struct uloop_signal *signal)
 {
-	odhcpd_reload();
+	odhcpd_reload("reload_cb");
 }
 
 int odhcpd_run(void)
@@ -2188,7 +2242,7 @@ int odhcpd_run(void)
 		}
 	}
 
-	odhcpd_reload();
+	odhcpd_reload("init");
 
 	/* uloop_init() already handles SIGINT/SIGTERM */
 	if (uloop_signal_add(&sighup) < 0)
