@@ -594,12 +594,11 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 			ifname = blobmsg_get_string(c);
 		else if ((c = tb[IFACE_ATTR_NETWORKID]))
 			ifname = blobmsg_get_string(c);
-	}
-
 #ifdef WITH_UBUS
-	if (overwrite || !iface->ifname)
-		ifname = ubus_get_ifname(name);
+		if (!iface->ifname && !ifname)
+			ifname = ubus_get_ifname(name);
 #endif
+	}
 
 	res = 1;
 	if (!iface->ifname && !ifname)
@@ -1153,7 +1152,11 @@ static void set_interface(struct uci_section *s)
 	uci_to_blob(&b, s, &interface_attr_list);
 
 	int res = config_parse_interface(blob_data(b.head), blob_len(b.head), s->e.name, true);
-	syslog(LOG_INFO, "set_interface: %s.%s: %d", s->type, s->e.name, res);
+	if (res) {
+		syslog(LOG_WARNING, "set_interface for (%s.%s) returns error %d", s->type, s->e.name, res);
+	} else {
+		syslog(LOG_INFO, "set_interface for (%s.%s) configured properly", s->type, s->e.name);
+	}
 }
 
 static void lease_delete_assignments(struct lease *l, bool v6)

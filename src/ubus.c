@@ -11,7 +11,7 @@
 #include "dhcpv4.h"
 
 static struct ubus_context *ubus = NULL;
-static struct ubus_subscriber netifd;
+static struct ubus_subscriber netifd_interfaces;
 static struct blob_buf b;
 static struct blob_attr *dump = NULL;
 static uint32_t netiface_ubus_objid = 0;
@@ -233,27 +233,44 @@ static const struct blobmsg_policy iface_attrs[IFACE_ATTR_MAX] = {
 	[IFACE_ATTR_ADDRESS] = { .name = "ipv6-address", .type = BLOBMSG_TYPE_ARRAY },
 };
 
+static void log_interface(const char* context, struct blob_attr *tb[IFACE_ATTR_MAX]) {
+	const char *interface = (tb[IFACE_ATTR_INTERFACE]) ? blobmsg_get_string(tb[IFACE_ATTR_INTERFACE]) : "";
+	const char *device = (tb[IFACE_ATTR_IFNAME]) ? blobmsg_get_string(tb[IFACE_ATTR_IFNAME]) : "";
+
+	bool up = false;
+	if (tb[IFACE_ATTR_UP] != NULL) {
+		up = blobmsg_get_bool(tb[IFACE_ATTR_UP]);
+	}
+
+	syslog(LOG_DEBUG, "%s: log_interface (%s): %d - %s", context, interface, (int) up, device);
+}
+
 static void handle_dump(_unused struct ubus_request *req, _unused int type, struct blob_attr *msg)
 {
 	struct blob_attr *tb[DUMP_ATTR_MAX];
+	struct blob_attr *c;
+	unsigned rem;
+
 	blobmsg_parse(dump_attrs, DUMP_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
 
 	if (!tb[DUMP_ATTR_INTERFACE]) {
-        syslog(LOG_WARNING, "No interface name to update via ubus");
+		syslog(LOG_WARNING, "No interface name to update via ubus");
 		return;
-    }
+	}
 
 	free(dump);
 	dump = blob_memdup(tb[DUMP_ATTR_INTERFACE]);
+
+	blobmsg_for_each_attr(c, dump, rem) {
+		struct blob_attr *tb[IFACE_ATTR_MAX];
+
+		blobmsg_parse(iface_attrs, IFACE_ATTR_MAX, tb, blobmsg_data(c), blobmsg_data_len(c));
+		log_interface("handle_dump", tb);
+	}
 	odhcpd_reload("handle_dump");
 }
 
-
-static void update_netifd(bool subscribe)
-{
-	if (subscribe)
-		ubus_subscribe(ubus, &netifd, netiface_ubus_objid);
-
+static void redump() {
 	ubus_abort_request(ubus, &req_dump);
 	blob_buf_init(&b, 0);
 
@@ -263,79 +280,39 @@ static void update_netifd(bool subscribe)
 	}
 }
 
+static void update_netifd()
+{
+	ubus_subscribe(ubus, &netifd_interfaces, netiface_ubus_objid);
+	redump();
+}
 
-static int handle_update(_unused struct ubus_context *ctx, _unused struct ubus_object *obj,
+
+static int handle_interface_update(_unused struct ubus_context *ctx, _unused struct ubus_object *obj,
 		_unused struct ubus_request_data *req, _unused const char *method,
 		struct blob_attr *msg)
 {
 	struct blob_attr *tb[IFACE_ATTR_MAX];
 	struct interface *c;
-	bool update = true;
+	bool update_interface_list = true;
 
 	blobmsg_parse(iface_attrs, IFACE_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
-	const char *interface = (tb[IFACE_ATTR_INTERFACE]) ?
-			blobmsg_get_string(tb[IFACE_ATTR_INTERFACE]) : "";
+
+	const char *interface = (tb[IFACE_ATTR_INTERFACE]) ? blobmsg_get_string(tb[IFACE_ATTR_INTERFACE]) : "";
+
+	log_interface("handle_interface_update", tb);
 
 	avl_for_each_element(&interfaces, c, avl) {
 		if (!strcmp(interface, c->name) && c->ignore) {
-			update = false;
+			update_interface_list = false;
 			break;
 		}
 	}
 
-	if (update)
-		update_netifd(false);
+	if (update_interface_list)
+		redump();
 
 	return 0;
 }
-
-/*
-void ubus_apply_network(void)
-{
-	struct blob_attr *a;
-	unsigned rem;
-
-	if (!dump)
-		return;
-
-    blobmsg_for_each_attr(a, dump, rem) {
-		struct blob_attr *tb[IFACE_ATTR_MAX];
-		blobmsg_parse(iface_attrs, IFACE_ATTR_MAX, tb, blobmsg_data(a), blobmsg_data_len(a));
-
-        if (!tb[IFACE_ATTR_INTERFACE] || !tb[IFACE_ATTR_DATA])
-			continue;
-
-		const char *interface = (tb[IFACE_ATTR_INTERFACE]) ?
-				blobmsg_get_string(tb[IFACE_ATTR_INTERFACE]) : "";
-
-        syslog(LOG_INFO, "Run interface update via ubus for %s", interface);
-
-		bool matched = false;
-		struct interface *c, *tmp;
-		avl_for_each_element_safe(&interfaces, c, avl, tmp) {
-			char *f = memmem(c->upstream, c->upstream_len,
-					interface, strlen(interface) + 1);
-			bool cmatched = !strcmp(interface, c->name);
-			matched |= cmatched;
-
-			if (!cmatched && (!c->upstream_len || !f || (f != c->upstream && f[-1] != 0)))
-				continue;
-
-			if (!c->ignore) {
-				config_parse_interface(blobmsg_data(tb[IFACE_ATTR_DATA]),
-						blobmsg_data_len(tb[IFACE_ATTR_DATA]), c->name, false);
-				syslog(LOG_INFO, "Run from ubus_apply_network 1: %s", c->name);
-			}
-		}
-
-		if (!matched) {
-			config_parse_interface(blobmsg_data(tb[IFACE_ATTR_DATA]),
-					blobmsg_data_len(tb[IFACE_ATTR_DATA]), interface, false);
-			syslog(LOG_INFO, "Run from ubus_apply_network 2: %s", a->data);
-		}
-	}
-}
-*/
 
 enum {
 	OBJ_ATTR_ID,
@@ -368,8 +345,9 @@ void ubus_bcast_dhcp_event(const char *type, const uint8_t *mac,
 	ubus_notify(ubus, &main_object, type, b.head, -1);
 }
 
-static void handle_event(_unused struct ubus_context *ctx, _unused struct ubus_event_handler *ev,
-                _unused const char *type, struct blob_attr *msg)
+static void handle_object_add_event(_unused struct ubus_context *ctx,
+	_unused struct ubus_event_handler *ev,
+        _unused const char *type, struct blob_attr *msg)
 {
 	struct blob_attr *tb[OBJ_ATTR_MAX];
 	blobmsg_parse(obj_attrs, OBJ_ATTR_MAX, tb, blob_data(msg), blob_len(msg));
@@ -381,10 +359,10 @@ static void handle_event(_unused struct ubus_context *ctx, _unused struct ubus_e
 		return;
 
 	netiface_ubus_objid = blobmsg_get_u32(tb[OBJ_ATTR_ID]);
-	update_netifd(true);
+	update_netifd();
 }
 
-static struct ubus_event_handler event_handler = { .cb = handle_event };
+static struct ubus_event_handler objects_changed_event_handler = { .cb = handle_object_add_event };
 
 
 const char* ubus_get_ifname(const char *name)
@@ -452,16 +430,17 @@ int ubus_init(void)
 		syslog(LOG_ERR, "Unable to connect to ubus: %m");
 		return -1;
 	}
-
-	netifd.cb = handle_update;
-	ubus_register_subscriber(ubus, &netifd);
-
-	ubus_add_uloop(ubus);
-	ubus_add_object(ubus, &main_object);
-	ubus_register_event_handler(ubus, &event_handler, "ubus.object.add");
+	// handle interfaces changes within netifd:
+	netifd_interfaces.cb = handle_interface_update;
+	ubus_register_subscriber(ubus, &netifd_interfaces);
+	// handle netifd change as whole ubus object:
+	ubus_register_event_handler(ubus, &objects_changed_event_handler, "ubus.object.add");
 	if (!ubus_lookup_id(ubus, "network.interface", &netiface_ubus_objid))
-		update_netifd(true);
-
+		update_netifd();
+	// propose own changes with respect to new leases:
+	ubus_add_object(ubus, &main_object);
+	// register ubus descriptor in main uloop of process:
+	ubus_add_uloop(ubus);
 	return 0;
 }
 
